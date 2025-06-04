@@ -1,3 +1,6 @@
+Here is the complete Python code for the INSEAD newsroom scraper, incorporating all the discussed refinements for extracting article details and handling pagination. You can use this code in your GitHub environment.
+
+```python
 import os
 import cloudscraper
 from bs4 import BeautifulSoup
@@ -12,7 +15,7 @@ import re
 # --- Configuration ---
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
 BASE_ID = "appoz4aD0Hjolycwd"
-TABLE_ID = "tblLnvZF5bb6oj9ef" # Using the correct table ID from the initial prompt's DEBUG logs
+TABLE_ID = "tblLnvZF5bb6oj9ef"
 
 # Airtable Field Names (using provided Field IDs for desired fields)
 FIELD_TITLE = "fldEhhyuhrKxmpjl0"
@@ -72,21 +75,33 @@ def extract_publication_date(article_url):
         else:
             logging.debug(f"Meta tag 'article:published_time' not found or content attribute missing for {article_url}. Falling back to link tag.")
 
-        # --- PRIORITY 2: Fallback to existing 'a.link.link--date' selector ---
+        # --- PRIORITY 2: Fallback to existing 'a.link.link--date' selector OR <time> tag ---
+        # User provided: <time datetime="2025-05-23T12:00:00Z">23 May '25</time>
+        time_tag = soup.find("time", datetime=True)
+        if time_tag and time_tag.has_attr("datetime"):
+            date_iso_str = time_tag["datetime"]
+            try:
+                date_object = datetime.fromisoformat(date_iso_str.replace('Z', '+00:00'))
+                iso_date = date_object.strftime("%Y-%m-%d")
+                logging.debug(f"Found and formatted date from <time> tag: '{date_iso_str}' -> '{iso_date}'")
+                return iso_date
+            except ValueError as ve:
+                logging.error(f"Failed to parse ISO date string '{date_iso_str}' from <time> tag for {article_url}: {ve}", exc_info=True)
+        
         date_tag = soup.select_one("a.link.link--date") 
         if date_tag:
             date_str = date_tag.get_text(strip=True)
             logging.debug(f"Found potential date string from link tag: '{date_str}' for {article_url}")
             try:
-                date_object = datetime.strptime(date_str, "%d %b %Y")
+                date_object = datetime.strptime(date_str, "%d %b '%y") # Updated format for 'YY
                 iso_date = date_object.strftime("%Y-%m-%d")
                 logging.debug(f"Successfully parsed and formatted date from link tag: '{date_str}' -> '{iso_date}')")
                 return iso_date
             except ValueError as ve:
-                logging.error(f"Failed to parse date string '{date_str}' from link tag for {article_url} into '%d %b %Y' format: {ve}", exc_info=True)
+                logging.error(f"Failed to parse date string '{date_str}' from link tag for {article_url} into '%d %b ''%y' format: {ve}", exc_info=True)
                 return None
         else:
-            logging.warning(f"Publication date tag 'a.link.link--date' NOT found for {article_url}. HTML structure might have changed or element is missing.")
+            logging.warning(f"Publication date tag 'a.link.link--date' or <time> NOT found for {article_url}. HTML structure might have changed or element is missing.")
             return None
     except Exception as e:
         logging.error(f"General error during date extraction for {article_url}: {e}", exc_info=True)
@@ -101,15 +116,22 @@ def process_and_add_articles(article_cards, existing_urls, table, added_count_re
     for card in article_cards:
         current_article_url = "N/A" 
         try:
-            # Refined link selection: Try to find the primary link within common heading/body elements
             link_tag = None
-            # Option 1: Link directly within a heading (most common for titles)
-            link_tag = card.select_one("h2 a[href], h3 a[href], h4 a[href]")
+            
+            # User provided: news title is in h3__link list-object__heading-link
+            link_tag = card.select_one("h3.list-object__heading-link a[href]")
             if not link_tag:
-                # Option 2: Link within the body or heading-like container if not directly in hX
+                # Refined link selection: Try to find the primary link within common heading/body elements
+                # Option 1: Link directly within a specific title container (common on INSEAD)
+                link_tag = card.select_one(".card-object__title a[href]")
+            if not link_tag:
+                # Option 2: Link within the body or general heading-like container
                 link_tag = card.select_one(".card-object__body a[href], .card-object__heading a[href]")
             if not link_tag:
-                # Option 3: General link search within the card (fallback)
+                # Option 3: General link search within any heading element
+                link_tag = card.select_one("h2 a[href], h3 a[href], h4 a[href]")
+            if not link_tag:
+                # Option 4: Broadest fallback - any link within the card
                 link_tag = card.find("a", href=True)
 
             if not link_tag:
@@ -125,12 +147,14 @@ def process_and_add_articles(article_cards, existing_urls, table, added_count_re
 
             title = link_tag.get_text(strip=True)
             
-            image_figure = card.select_one(".card-object__figure")
-            image_tag = None
-            if image_figure:
-                image_tag = image_figure.select_one("picture img")
-                if not image_tag:
-                    image_tag = image_figure.select_one("img")
+            # User provided: image url is under a class link--image-overlay.
+            image_tag = card.select_one(".link--image-overlay img")
+            if not image_tag: # Fallback to previous selectors if new one fails
+                image_figure = card.select_one(".card-object__figure")
+                if image_figure:
+                    image_tag = image_figure.select_one("picture img")
+                    if not image_tag:
+                        image_tag = image_figure.select_one("img")
 
             image_url = ""
             if image_tag:
@@ -209,25 +233,25 @@ def main():
         
         # --- Extract Drupal.settings from inline script tags ---
         drupal_settings_json = None
-        # Look for script tags that contain the "Drupal.settings =" pattern
-        script_tags = soup.find_all("script", string=re.compile(r"Drupal\.settings\s*="))
+        # Look for script tags that contain the "Drupal.settings =" pattern by iterating through all script contents
+        script_tags = soup.find_all("script")
         for script_tag in script_tags:
             script_content = script_tag.string
             if script_content:
-                # Extract the JSON part after "Drupal.settings ="
-                match = re.search(r"Drupal\.settings\s*=\s*(\{.*?\});", script_content, re.DOTALL)
+                # Ensure it's a string before using regex
+                script_content_str = str(script_content)
+                match = re.search(r"Drupal\.settings\s*=\s*(\{.*?\});", script_content_str, re.DOTALL)
                 if match:
                     try:
                         drupal_settings_json = json.loads(match.group(1))
                         logging.info("Successfully extracted and parsed Drupal.settings from inline script.")
                         break
                     except json.JSONDecodeError as jde:
-                        logging.debug(f"Failed to decode Drupal.settings JSON from script content: {jde}")
+                        logging.debug(f"Failed to decode Drupal.settings JSON from script content for this tag: {jde}")
                         continue
         
         if drupal_settings_json:
             ajax_page_state = drupal_settings_json.get('ajaxPageState', {})
-            # We are extracting libraries, but will not use it in the AJAX call to debug 404
             ajax_libraries_param = ajax_page_state.get('libraries', '')
             if ajax_libraries_param:
                 logging.info(f"Extracted ajax_page_state[libraries] from JSON: {ajax_libraries_param[:50]}...")
@@ -242,23 +266,24 @@ def main():
             for view_id_key, view_data in views_settings.items():
                 if isinstance(view_data, dict) and 'ajax' in view_data:
                     ajax_view_data = view_data['ajax']
-                    if ajax_view_data.get('view_path') == "/newsroom/news": # Match the correct view
+                    # Use a more flexible check for view_path if the exact match fails
+                    if ajax_view_data.get('view_path') == "/newsroom/news" or (view_name == "newsroom_archive" and view_display_id == "news_room_archive_page"):
                         if 'view_name' in ajax_view_data and 'view_display_id' in ajax_view_data:
                             view_name = ajax_view_data['view_name']
                             view_display_id = ajax_view_data['view_display_id']
-                            logging.info(f"Dynamically extracted view_name: '{view_name}' and view_display_id: '{view_display_id}' by matching view_path.")
+                            logging.info(f"Dynamically extracted view_name: '{view_name}' and view_display_id: '{view_display_id}' by matching view_path or hardcoded defaults.")
                             view_name_dynamically_extracted = True
                             view_display_id_dynamically_extracted = True
                             if 'dom_id' in ajax_view_data:
                                 view_dom_id = ajax_view_data['dom_id']
-                                logging.info(f"Dynamically extracted view_dom_id: '{view_dom_id}' associated with the matched view_path.")
+                                logging.info(f"Dynamically extracted view_dom_id: '{view_dom_id}' associated with the matched view.")
                                 dom_id_dynamically_extracted = True
                             break 
 
             if not dom_id_dynamically_extracted:
                 logging.warning("Dynamic view_dom_id not found in Drupal.settings JSON associated with /newsroom/news. Using initial hardcoded value or existing one.")
             if not view_name_dynamically_extracted or not view_display_id_dynamically_extracted:
-                logging.warning(f"Failed to dynamically extract view_name/view_display_id by view_path. Falling back to hardcoded values. Current view_name: '{view_name}', view_display_id: '{view_display_id}'")
+                logging.warning(f"Failed to dynamically extract view_name/view_display_id. Falling back to hardcoded values. Current view_name: '{view_name}', view_display_id: '{view_display_id}'")
                 view_name = "newsroom_archive"
                 view_display_id = "news_room_archive_page"
                 logging.info(f"Using hardcoded view_name: '{view_name}' and view_display_id: '{view_display_id}'.")
@@ -267,7 +292,7 @@ def main():
             logging.warning("Drupal.settings (inline JS) not found. Falling back to regex for parameters.")
             html_content_str = response.content.decode('utf-8')
             
-            # Fallback regex for ajax_page_state[libraries]
+            # Fallback regex for ajax_page_state[libraries] (still extract but don't send)
             match_libs = re.search(r'"ajaxPageState":{"libraries":"(.*?)"', html_content_str)
             if match_libs:
                 ajax_libraries_param = match_libs.group(1)
@@ -289,7 +314,7 @@ def main():
             logging.info(f"Using hardcoded view_name: '{view_name}' and view_display_id: '{view_display_id}' due to complete fallback.")
 
 
-        time.sleep(5) 
+        time.sleep(10) # Increased sleep time
 
     except Exception as e:
         logging.error(f"Error fetching initial homepage or extracting AJAX state: {e}", exc_info=True)
@@ -396,10 +421,11 @@ def main():
             break 
 
         page_num += 1
-        time.sleep(5) 
+        time.sleep(10) # Increased sleep time
     
     logging.info(f"Scraper Finished. {added_count[0]} new article(s) added. {skipped_duplicates_count[0]} duplicates skipped.")
     print(f"✅ Done. {added_count[0]} new articles added. {skipped_duplicates_count[0]} duplicates skipped. See insead_newsroom_scrape.log for details.")
 
 if __name__ == "__main__":
     main()
+```
