@@ -1,6 +1,3 @@
-Here is the complete Python code for the INSEAD newsroom scraper, incorporating all the discussed refinements for extracting article details and handling pagination. You can use this code in your GitHub environment.
-
-```python
 import os
 import cloudscraper
 from bs4 import BeautifulSoup
