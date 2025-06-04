@@ -25,7 +25,7 @@ jobs:
         env:
           AIRTABLE_API_KEY: ${{ secrets.AIRTABLE_API_KEY }}
         run: |
-          python insead_scraper.py
+          python inseadnews.py
 
       - name: Upload log file
         if: always()
